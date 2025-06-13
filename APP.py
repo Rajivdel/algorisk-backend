@@ -2018,5 +2018,14 @@ def download_validation():
         return FileResponse(tmp.name, filename="validation_report.docx", media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
 # === Run FastAPI Locally ===
+
+    from fastapi import FastAPI
+
+fastapi_app = FastAPI()
+
+# define endpoints...
+
 if __name__ == "__main__":
-    uvicorn.run("app:fastapi_app", host="0.0.0.0", port=8000, reload=True)
+    import uvicorn
+    uvicorn.run("app:fastapi_app", host="0.0.0.0", port=8000)
+
