@@ -9,3 +9,7 @@ scikit-learn
 openai
 google-generativeai
 python-dotenv
+streamlit
+openai
+fastapi
+
