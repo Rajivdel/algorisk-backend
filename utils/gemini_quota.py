@@ -3,7 +3,7 @@ from datetime import datetime
 
 DB_NAME = "users.db"  # Use your existing DB
 
-MONTHLY_TOKEN_LIMIT = 1000000  # Set your monthly Gemini token limit
+MONTHLY_TOKEN_LIMIT = 100000  # Set your monthly Gemini token limit
 
 def init_gemini_token_usage_db():
     conn = sqlite3.connect(DB_NAME)
