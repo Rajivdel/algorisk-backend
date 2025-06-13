@@ -1,67 +1,111 @@
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, Form, Request
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List
-import os
+from pydantic import BaseModel
 import tempfile
+import os
+import shutil
+
+from utils.rag_engine import SimpleRAG
+from utils.doc_gen import generate_doc_from_inputs
+from utils.validator import validate_model
+from utils.doc_gen import create_word_doc
+from docx import Document
 
 app = FastAPI()
 
-# Enable CORS for local and v0 frontend access
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Set to your v0 frontend domain in production
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {"status": "Backend running", "message": "Welcome to AlgoRisk Backend API"}
+# Load Gemini API
+import google.generativeai as genai
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    raise Exception("Gemini API key not found. Set GEMINI_API_KEY as environment variable.")
+
+# Shared RAG system
+rag_system = SimpleRAG()
+
+# === Endpoints ===
 
 @app.post("/build-knowledge-base")
-async def build_knowledge_base(files: List[UploadFile] = File(...)):
+async def build_kb(files: list[UploadFile] = File(...)):
+    docs = []
     for file in files:
-        contents = await file.read()
-        with open(os.path.join(tempfile.gettempdir(), file.filename), 'wb') as f:
-            f.write(contents)
-    return {"status": "success", "message": "Knowledge base built from uploaded files"}
+        content = await file.read()
+        text = content.decode("utf-8", errors="ignore")
+        docs.append({'content': text, 'source': file.filename, 'type': 'uploaded'})
+    chunk_count = rag_system.build_knowledge_base(docs)
+    return {"status": "success", "indexed_chunks": chunk_count}
 
 @app.post("/generate-documentation")
-async def generate_documentation(comments: str = Form(...)):
-    dummy_doc_path = os.path.join(tempfile.gettempdir(), "model_documentation.docx")
-    with open(dummy_doc_path, "w") as f:
-        f.write("AI-Generated Documentation\n\n" + comments)
-    return {"status": "success", "message": "Documentation generated", "download_url": "/download-doc"}
+async def generate_doc(
+    code: UploadFile = File(...),
+    data: UploadFile = File(None),
+    config: UploadFile = File(None),
+    comments: str = Form(""),
+    model_type: str = Form("PD"),
+    portfolio_type: str = Form("Credit Card"),
+    regulations: str = Form("IFRS 9"),
+):
+    code_content = await code.read()
+    code_str = code_content.decode("utf-8", errors="ignore")
+
+    data_str = await data.read() if data else b""
+    config_str = await config.read() if config else b""
+
+    rag_result = generate_doc_from_inputs(
+        rag_system, code_str, data_str.decode("utf-8"), config_str.decode("utf-8"),
+        model_type, portfolio_type, regulations.split(","), comments
+    )
+
+    # Generate Word
+    doc_buffer, filename = create_word_doc(rag_result, model_type)
+    temp_file_path = f"/tmp/{filename}"
+    with open(temp_file_path, "wb") as f:
+        f.write(doc_buffer.read())
+
+    return FileResponse(temp_file_path, filename=filename)
 
 @app.post("/run-validation")
-async def run_validation(level: str = Form(...)):
-    return {
-        "status": "success",
-        "validation_level": level,
-        "results": {
-            "overall_score": 85,
-            "compliant": 12,
-            "non_compliant": 3,
-            "warnings": 2
-        }
-    }
+async def validate(
+    code: UploadFile = File(...),
+    doc: UploadFile = File(...),
+    level: str = Form("Standard")
+):
+    code_str = (await code.read()).decode("utf-8", errors="ignore")
+    doc_str = (await doc.read()).decode("utf-8", errors="ignore")
+    result = validate_model(rag_system, code_str, doc_str, level)
+    return JSONResponse(content=result)
 
 @app.post("/chat-rag")
-async def chat_rag(prompt: str = Form(...)):
-    return {"response": f"Simulated AI answer for: {prompt}"}
+async def chat_rag(request: Request):
+    data = await request.json()
+    message = data.get("message", "")
+    response = rag_system.query(message)
+    return {"response": response.get("response", ""), "workflow": response.get("workflow", [])}
 
 @app.get("/download-doc")
 def download_doc():
-    dummy_path = os.path.join(tempfile.gettempdir(), "model_documentation.docx")
-    if not os.path.exists(dummy_path):
-        return JSONResponse(status_code=404, content={"detail": "Documentation not found"})
-    return FileResponse(dummy_path, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename="model_documentation.docx")
+    doc = Document()
+    doc.add_heading("Model Documentation", 0)
+    doc.add_paragraph("This is a placeholder.")
+    path = "/tmp/doc_placeholder.docx"
+    doc.save(path)
+    return FileResponse(path, filename="model_doc.docx")
 
 @app.get("/download-validation-report")
-def download_validation_report():
-    dummy_report = os.path.join(tempfile.gettempdir(), "validation_report.txt")
-    with open(dummy_report, "w") as f:
-        f.write("Validation report: Overall Score = 85%, 3 issues found.")
-    return FileResponse(dummy_report, media_type="text/plain", filename="validation_report.txt")
+def download_val():
+    doc = Document()
+    doc.add_heading("Validation Report", 0)
+    doc.add_paragraph("Sample validation result.")
+    path = "/tmp/validation_report.docx"
+    doc.save(path)
+    return FileResponse(path, filename="validation_report.docx")
