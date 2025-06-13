@@ -47,6 +47,21 @@ def login(email: str = Form(...), password: str = Form(...)):
     if user:
         return {"success": True, "user": user}
     raise HTTPException(status_code=401, detail="Invalid credentials.")
+from utils.gemini_quota import can_use_gemini, add_tokens_used, MONTHLY_TOKEN_LIMIT, get_tokens_used_this_month
+
+@app.post("/doc/generate")
+def generate_doc(...):
+    # ...existing code...
+    estimated_tokens = 1500  # Or whatever you set as max_output_tokens
+    if not can_use_gemini(estimated_tokens):
+        return JSONResponse(
+            status_code=429,
+            content={"error": f"You have exceeded your monthly Gemini token usage limit ({MONTHLY_TOKEN_LIMIT} tokens). Please try again next month."}
+        )
+    # ...call Gemini...
+    # After successful call, record usage:
+    add_tokens_used(estimated_tokens)
+    # ...return response...
 
 # --- RAG Knowledge Base Build ---
 @app.post("/rag/build")
