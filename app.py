@@ -1,111 +1,113 @@
-from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import JSONResponse, FileResponse
+"""
+app.py - FastAPI backend for AlgoRisk AI RAG-powered Risk Model Documentation/Validation
+
+- Exposes endpoints for:
+    - RAG knowledge base building
+    - Model documentation generation (standard & RAG-enhanced)
+    - Model validation (standard & RAG-enhanced)
+- Uses modular utils: rag_engine, doc_gen, validator
+"""
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import tempfile
-import os
-import shutil
-
+from typing import List, Optional
 from utils.rag_engine import SimpleRAG
-from utils.doc_gen import generate_doc_from_inputs
-from utils.validator import validate_model
-from utils.doc_gen import create_word_doc
-from docx import Document
+from utils.doc_gen import generate_documentation_content, create_word_document, generate_rag_enhanced_documentation
+from utils.validator import validate_model_documentation, signup_user, verify_login
+import json
 
-app = FastAPI()
+app = FastAPI(
+    title="AlgoRisk AI Backend",
+    description="RAG-powered Risk Model Documentation/Validation API",
+    version="1.0.0"
+)
 
-# CORS
+# Allow CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load Gemini API
-import google.generativeai as genai
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
-    raise Exception("Gemini API key not found. Set GEMINI_API_KEY as environment variable.")
-
-# Shared RAG system
+# --- In-memory RAG system (for demo; use persistent store in prod) ---
 rag_system = SimpleRAG()
 
-# === Endpoints ===
+# --- Auth Endpoints ---
+@app.post("/signup")
+def signup(name: str = Form(...), email: str = Form(...), password: str = Form(...)):
+    if signup_user(name, email, password):
+        return {"success": True, "message": "Signup successful."}
+    raise HTTPException(status_code=400, detail="Email already exists.")
 
-@app.post("/build-knowledge-base")
-async def build_kb(files: list[UploadFile] = File(...)):
-    docs = []
+@app.post("/login")
+def login(email: str = Form(...), password: str = Form(...)):
+    user = verify_login(email, password)
+    if user:
+        return {"success": True, "user": user}
+    raise HTTPException(status_code=401, detail="Invalid credentials.")
+
+# --- RAG Knowledge Base Build ---
+@app.post("/rag/build")
+def build_knowledge_base(files: List[UploadFile] = File(...)):
+    documents = []
     for file in files:
-        content = await file.read()
-        text = content.decode("utf-8", errors="ignore")
-        docs.append({'content': text, 'source': file.filename, 'type': 'uploaded'})
-    chunk_count = rag_system.build_knowledge_base(docs)
-    return {"status": "success", "indexed_chunks": chunk_count}
+        content = file.file.read().decode("utf-8", errors="ignore")
+        documents.append({"text": content, "type": file.content_type, "source": file.filename})
+    rag_system.build_knowledge_base(documents)
+    return {"success": True, "message": f"Knowledge base built with {len(documents)} documents."}
 
-@app.post("/generate-documentation")
-async def generate_doc(
+# --- RAG Query Endpoint ---
+@app.post("/rag/query")
+def rag_query(query: str = Form(...), k: int = Form(5)):
+    result = rag_system.query(query, k=k)
+    return result
+
+# --- Documentation Generation ---
+@app.post("/doc/generate")
+def generate_doc(
     code: UploadFile = File(...),
-    data: UploadFile = File(None),
-    config: UploadFile = File(None),
-    comments: str = Form(""),
-    model_type: str = Form("PD"),
-    portfolio_type: str = Form("Credit Card"),
-    regulations: str = Form("IFRS 9"),
+    results: Optional[str] = Form(None),
+    model_type: str = Form(...),
+    portfolio_type: str = Form(...),
+    regulations: str = Form(...),  # JSON list
+    data: Optional[UploadFile] = File(None),
+    config: Optional[UploadFile] = File(None),
+    use_rag: bool = Form(False)
 ):
-    code_content = await code.read()
-    code_str = code_content.decode("utf-8", errors="ignore")
+    code_content = code.file.read().decode("utf-8", errors="ignore")
+    data_content = data.file.read().decode("utf-8", errors="ignore") if data else None
+    config_content = config.file.read().decode("utf-8", errors="ignore") if config else None
+    regulations_list = json.loads(regulations)
+    results_dict = json.loads(results) if results else {}
+    code_analysis = {}  # Optionally call analyze_code_structure here
+    if use_rag:
+        doc_content = generate_rag_enhanced_documentation(
+            rag_system, code_analysis, results_dict, model_type, portfolio_type, regulations_list,
+            code_content, data_content, config_content, additional_info="", workflow_placeholder=None
+        )
+    else:
+        doc_content = generate_documentation_content(
+            code_analysis, results_dict, model_type, portfolio_type, regulations_list,
+            code_content_str=code_content, data_content_str=data_content, config_content_str=config_content
+        )
+    doc_buffer, doc_filename = create_word_document(doc_content, model_type)
+    return StreamingResponse(doc_buffer, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers={"Content-Disposition": f"attachment; filename={doc_filename}"})
 
-    data_str = await data.read() if data else b""
-    config_str = await config.read() if config else b""
-
-    rag_result = generate_doc_from_inputs(
-        rag_system, code_str, data_str.decode("utf-8"), config_str.decode("utf-8"),
-        model_type, portfolio_type, regulations.split(","), comments
-    )
-
-    # Generate Word
-    doc_buffer, filename = create_word_doc(rag_result, model_type)
-    temp_file_path = f"/tmp/{filename}"
-    with open(temp_file_path, "wb") as f:
-        f.write(doc_buffer.read())
-
-    return FileResponse(temp_file_path, filename=filename)
-
-@app.post("/run-validation")
-async def validate(
-    code: UploadFile = File(...),
+# --- Model Validation ---
+@app.post("/validate")
+def validate_doc(
     doc: UploadFile = File(...),
-    level: str = Form("Standard")
+    code: UploadFile = File(...),
+    validation_level: str = Form("Standard Review")
 ):
-    code_str = (await code.read()).decode("utf-8", errors="ignore")
-    doc_str = (await doc.read()).decode("utf-8", errors="ignore")
-    result = validate_model(rag_system, code_str, doc_str, level)
-    return JSONResponse(content=result)
+    doc_text = doc.file.read().decode("utf-8", errors="ignore")
+    code_content = code.file.read().decode("utf-8", errors="ignore")
+    results = validate_model_documentation(doc_text, code_content, validation_level)
+    return JSONResponse(content=results)
 
-@app.post("/chat-rag")
-async def chat_rag(request: Request):
-    data = await request.json()
-    message = data.get("message", "")
-    response = rag_system.query(message)
-    return {"response": response.get("response", ""), "workflow": response.get("workflow", [])}
-
-@app.get("/download-doc")
-def download_doc():
-    doc = Document()
-    doc.add_heading("Model Documentation", 0)
-    doc.add_paragraph("This is a placeholder.")
-    path = "/tmp/doc_placeholder.docx"
-    doc.save(path)
-    return FileResponse(path, filename="model_doc.docx")
-
-@app.get("/download-validation-report")
-def download_val():
-    doc = Document()
-    doc.add_heading("Validation Report", 0)
-    doc.add_paragraph("Sample validation result.")
-    path = "/tmp/validation_report.docx"
-    doc.save(path)
-    return FileResponse(path, filename="validation_report.docx")
+# --- Health Check ---
+@app.get("/health")
+def health():
+    return {"status": "ok"}
