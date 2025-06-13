@@ -12,4 +12,5 @@ python-dotenv
 streamlit
 openai
 fastapi
+werkzeug
 
