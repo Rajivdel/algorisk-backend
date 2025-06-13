@@ -2,6 +2,7 @@ import os
 from typing import List, Dict, Any, Callable
 from collections import defaultdict
 import numpy as np
+from flask import Flask, request, jsonify
 
 # --- Simple Embedding (TF-IDF style, no external dependencies) ---
 class SimpleEmbedding:
@@ -134,3 +135,19 @@ class SimpleRAG:
         response = self.generate_response(question, context)
         self.log_step(f"Response generated", status="success")
         return {"response": response, "context": context, "workflow": self.workflow_steps}
+
+app = Flask(__name__)
+rag = SimpleRAG()
+
+@app.route('/api/knowledge-base/build', methods=['POST'])
+def build_kb():
+    files = request.files.getlist('files')
+    include_built_in = request.form.get('include_built_in', 'false')
+    documents = []
+    for file in files:
+        content = file.read()
+        text = content.decode('utf-8', errors='ignore')  # For TXT
+        documents.append({'text': text, 'source': file.filename, 'type': 'uploaded'})
+    # Optionally add built-in docs
+    rag.build_knowledge_base(documents)
+    return jsonify({'message': 'Knowledge base built successfully!'})
