@@ -14,3 +14,4 @@ CREATE TABLE IF NOT EXISTS users (
 conn.commit()
 conn.close()
 print("Database initialized.")
+init_gemini_token_usage_db()
